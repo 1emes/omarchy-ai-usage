@@ -32,6 +32,7 @@ class PreferenceTests(unittest.TestCase):
             "showPercentage",
             "showResetTimer",
             "animations",
+            "accentColor",
             "enabledProviders",
         ):
             with self.subTest(key=key):
@@ -55,8 +56,11 @@ class PreferenceTests(unittest.TestCase):
             "Open",
             "Refresh",
             "Provider label",
-            "Percentage",
             "Reset time",
+            "Claude color",
+            "Codex color",
+            "Antigravity color",
+            "Cursor color",
             "Motion",
         ):
             with self.subTest(label=label):
@@ -71,7 +75,7 @@ class PreferenceTests(unittest.TestCase):
         self.assertIn("animationsEnabled: root.motionEnabled", self.window)
         self.assertIn("duration: root.motionEnabled ? 500 : 0", self.window)
         ring = (ROOT / "src" / "ui" / "UsageRing.qml").read_text()
-        self.assertIn("duration: root.animationsEnabled ? 900 : 0", ring)
+        self.assertIn("enabled: root.animationsEnabled", ring)
 
     def test_semantic_size_scales_geometry_typography_and_rings(self) -> None:
         compact = (ROOT / "src" / "ui" / "CompactNotch.qml").read_text()
@@ -79,7 +83,7 @@ class PreferenceTests(unittest.TestCase):
         ring = (ROOT / "src" / "ui" / "UsageRing.qml").read_text()
         self.assertIn('preferences.size === "small" ? 0.85', self.window)
         self.assertIn('preferences.size === "large" ? 1.2', self.window)
-        self.assertIn("font.pixelSize: 14 * root.uiScale", compact)
+        self.assertIn("font.pixelSize: 9 * root.uiScale", compact)
         self.assertIn("font.pixelSize: 14 * root.uiScale", expanded)
         self.assertIn("(44 / 117) * uiScale", ring)
 

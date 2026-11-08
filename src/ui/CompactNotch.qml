@@ -11,7 +11,8 @@ Item {
   property real uiScale: 1
   property bool animationsEnabled: true
   property bool showProviderLabel: false
-  property bool showPercentage: true
+  property string accentColor: "auto"
+  property var providerColors: ({})
 
   signal surfaceHovered(bool hovered)
   signal providerHovered(int index, bool hovered)
@@ -110,7 +111,9 @@ Item {
 
       required property var modelData
       required property int index
-      property real reveal: root.unfolded ? 1 : 0
+      // Rings wait for the silhouette to finish unfolding (openProgress is eased,
+      // so 0.995 is visually complete); folding hides them immediately.
+      property real reveal: root.unfolded && root.openProgress >= 0.995 ? 1 : 0
       readonly property real outwardX: root.edge === "right" ? 1 : (root.edge === "left" ? -1 : 0)
       readonly property real outwardY: root.edge === "bottom" ? 1 : (root.edge === "top" ? -1 : 0)
 
@@ -150,7 +153,12 @@ Item {
           usedPercent: cell.modelData.usedPercent
           stale: Boolean(cell.modelData.stale)
           animationsEnabled: root.animationsEnabled
+          active: cell.reveal > 0.01
+          hovered: cellMouse.containsMouse
+          pressed: cellMouse.pressed
           uiScale: root.uiScale
+          accentColor: root.accentColor
+          providerColor: String((root.providerColors || ({}))[String(cell.modelData.id || "")] || "auto")
           accessibleName: String(cell.modelData.displayName || "Provider") + " usage"
         }
 
@@ -160,22 +168,13 @@ Item {
           height: root.percentLineHeight
           horizontalAlignment: Text.AlignHCenter
           verticalAlignment: Text.AlignVCenter
-          visible: root.showProviderLabel || root.showPercentage
-          text: {
-            var label = root.showProviderLabel ? String(cell.modelData.displayName || "Provider") : ""
-            var percent = ""
-            if (root.showPercentage) {
-              percent = typeof cell.modelData.usedPercent === "number" && isFinite(cell.modelData.usedPercent)
-                ? Math.round(Math.max(0, Math.min(100, cell.modelData.usedPercent))) + "%"
-                : "—"
-            }
-            return label && percent ? label + " " + percent : (label || percent)
-          }
+          visible: root.showProviderLabel
+          text: String(cell.modelData.displayName || "Provider")
           textFormat: Text.PlainText
           color: "#ffffff"
           opacity: cell.modelData.stale ? 0.45 : 1
           font.family: "sans-serif"
-          font.pixelSize: 14 * root.uiScale
+          font.pixelSize: 9 * root.uiScale
           font.weight: Font.DemiBold
           font.letterSpacing: -0.15
         }

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import shutil
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -88,13 +90,13 @@ class CompactUiTests(unittest.TestCase):
     def test_codenotch_palette_and_used_thresholds_are_exact(self) -> None:
         source = "\n".join(
             (ROOT / "src" / "ui" / name).read_text()
-            for name in ("EdgeNotchSurface.qml", "ExpandedCard.qml", "UsageRing.qml")
+            for name in ("EdgeNotchSurface.qml", "ExpandedCard.qml", "UsageRing.qml", "Usage.js")
         )
         for color in ("#000000", "#303030", "#2d2d2d", "#00ff88", "#f2ff00", "#ff3f00"):
             with self.subTest(color=color):
                 self.assertIn(color, source)
-        self.assertIn("safeUsed < 50", source)
-        self.assertIn("safeUsed < 70", source)
+        self.assertIn("used < 50", source)
+        self.assertIn("used < 70", source)
         self.assertNotIn("Color.background", source)
 
     def test_expanded_view_uses_codenotch_inspired_linear_windows(self) -> None:
@@ -143,14 +145,19 @@ class CompactUiTests(unittest.TestCase):
         self.assertIn("cell.index * 45", compact)
         self.assertIn("interval: 250", window)
         self.assertIn("duration: root.motionEnabled ? 500 : 0", window)
-        self.assertIn("duration: root.animationsEnabled ? 900 : 0", ring)
+        self.assertIn("enabled: root.animationsEnabled", ring)
+        self.assertIn("SpringAnimation", ring)
 
     def test_pointer_leaving_surface_closes_even_after_delegates_rebuild(self) -> None:
         window = (ROOT / "src" / "ui" / "EdgeWindow.qml").read_text()
         compact = (ROOT / "src" / "ui" / "CompactNotch.qml").read_text()
         self.assertIn("HoverHandler {", window)
         self.assertIn("if (!hovered) root.pointerLeftSurface()", window)
-        self.assertIn("root.hoveringProvider = false", window)
+        leave_surface = window.split("function pointerLeftSurface() {", 1)[1].split("\n  }", 1)[0]
+        for flag in ("hoveringSurface", "hoveringProvider", "hoveringCard", "hoveringPanel"):
+            with self.subTest(flag=flag):
+                self.assertIn(f"root.{flag} = false", leave_surface)
+        self.assertIn("root.scheduleClose()", leave_surface)
         self.assertIn("if (cellMouse.containsMouse) root.providerHovered(cell.index, false)", compact)
 
     def test_settings_follow_auto_hide_after_pointer_leaves(self) -> None:
@@ -160,6 +167,139 @@ class CompactUiTests(unittest.TestCase):
         self.assertIn("root.settingsOpen = false", window)
         self.assertIn("root.heldOpen = false", window)
         self.assertNotIn("root.heldOpen = true\n        if (root.hoveredIndex", window)
+
+
+class UsageHelpersTests(unittest.TestCase):
+    """Runs the pure helpers in Usage.js under node; skipped when node is absent."""
+
+    def run_js(self, expression: str) -> object:
+        node = shutil.which("node")
+        if node is None:
+            self.skipTest("node not available")
+        source = (ROOT / "src" / "ui" / "Usage.js").read_text().replace(".pragma library", "")
+        script = f"{source}\nconsole.log(JSON.stringify({expression}))"
+        result = subprocess.run([node, "-e", script], capture_output=True, text=True, check=True)
+        return json.loads(result.stdout)
+
+    def test_accent_accepts_only_six_digit_hex(self) -> None:
+        self.assertEqual(self.run_js('validAccent("#7C9CFF")'), "#7c9cff")
+        for bad in ("red", "#fff", "#gggggg", "", "javascript:1"):
+            with self.subTest(bad=bad):
+                self.assertEqual(self.run_js(f"validAccent({json.dumps(bad)})"), "auto")
+
+    def test_custom_accent_replaces_threshold_scale(self) -> None:
+        self.assertEqual(self.run_js('usageColor(10, "auto")'), "#00ff88")
+        self.assertEqual(self.run_js('usageColor(90, "auto")'), "#ff3f00")
+        self.assertEqual(self.run_js('usageColor(90, "#7c9cff")'), "#7c9cff")
+        self.assertEqual(self.run_js('usageColor(null, "#7c9cff")'), "#808080")
+
+    def test_pace_projects_limit_before_reset(self) -> None:
+        window = '{usedPercent: 60, resetAt: "2026-01-01T05:00:00Z", durationMinutes: 300}'
+        now = 'Date.parse("2026-01-01T03:00:00Z")'  # 60% elapsed
+        self.assertEqual(self.run_js(f"pace({window}, {now})")["tone"], "ok")
+        fast = '{usedPercent: 60, resetAt: "2026-01-01T05:00:00Z", durationMinutes: 300}'
+        early = 'Date.parse("2026-01-01T00:30:00Z")'  # 10% elapsed, 60% used
+        result = self.run_js(f"pace({fast}, {early})")
+        self.assertEqual(result["tone"], "over")
+        self.assertIn("~", result["text"])
+
+    def test_pace_is_null_without_reset_metadata(self) -> None:
+        self.assertIsNone(self.run_js("pace({usedPercent: 50, resetAt: null, durationMinutes: null}, 0)"))
+
+
+class InsightsHelpersTests(unittest.TestCase):
+    """Chart, formatting and validation helpers (same node harness)."""
+
+    run_js = UsageHelpersTests.run_js
+
+    def test_compact_numbers_and_model_labels(self) -> None:
+        self.assertEqual(self.run_js("compactNumber(5859345)"), "5.9M")
+        self.assertEqual(self.run_js("compactNumber(999600)"), "1M")
+        self.assertEqual(self.run_js("compactNumber(340)"), "340")
+        self.assertEqual(self.run_js("compactNumber(-1)"), "\u2014")
+        for raw, label in (
+            ("claude-sonnet-5-5", "Sonnet 5.5"),
+            ("gpt-6-luna", "GPT-6 Luna"),
+            ("claude-3-5-sonnet-20241022", "3.5 Sonnet"),
+            ("", "Unknown"),
+        ):
+            with self.subTest(raw=raw):
+                self.assertEqual(self.run_js(f"modelLabel({json.dumps(raw)})"), label)
+
+    def test_smooth_path_never_leaves_the_plot(self) -> None:
+        segments = self.run_js(
+            '(function(){var p=smoothPath([0,9,0,9,0],100,40);'
+            'return p.line.split(" C ").slice(1).map(function(s){var a=s.split(" ").map(Number);return [a[1],a[3],a[5]]})})()'
+        )
+        self.assertEqual(len(segments), 4)
+        for control_ys in segments:
+            for y in control_ys:
+                self.assertTrue(3 <= y <= 38.5, y)
+        self.assertEqual(self.run_js("smoothPath([1],100,40).line"), "")
+
+    def test_insights_document_is_validated_before_use(self) -> None:
+        hourly = ", ".join('{tokens: 1}' for _ in range(24))
+        good = f'{{schemaVersion: 1, providerId: "claude", hourly: [{hourly}], models: [], totals: {{}}}}'
+        self.assertTrue(self.run_js(f'isInsights({good}, "claude")'))
+        self.assertFalse(self.run_js(f'isInsights({good}, "codex")'))
+        self.assertFalse(self.run_js('isInsights({schemaVersion: 1, providerId: "claude", hourly: [], models: [], totals: {}}, "claude")'))
+        self.assertFalse(self.run_js('isInsights(null, "claude")'))
+
+    def test_long_model_lists_collapse_into_other(self) -> None:
+        merged = self.run_js(
+            '(function(){var m=[1,2,3,4,5,6].map(function(i){return {name:"m"+i,tokens:i,share:0.1*i}});'
+            'return collapseModels(m,4)})()'
+        )
+        self.assertEqual([m["name"] for m in merged], ["m1", "m2", "m3", "other"])
+        self.assertEqual(merged[-1]["tokens"], 15)
+        self.assertAlmostEqual(merged[-1]["share"], 1.5)
+
+
+class InsightsWiringTests(unittest.TestCase):
+    def read(self, *parts: str) -> str:
+        return (ROOT.joinpath("src", *parts)).read_text()
+
+    def test_rings_wait_for_the_silhouette_to_finish_unfolding(self) -> None:
+        compact = self.read("ui", "CompactNotch.qml")
+        ring = self.read("ui", "UsageRing.qml")
+        self.assertIn("root.unfolded && root.openProgress >= 0.995 ? 1 : 0", compact)
+        self.assertIn("active: cell.reveal > 0.01", compact)
+        self.assertIn("active ? safeUsed / 100 : 0", ring)
+
+    def test_clicking_a_logo_opens_the_app_instead_of_refreshing(self) -> None:
+        window = self.read("ui", "EdgeWindow.qml")
+        block = window.split("onProviderActivated: function(index) {")[1].split("\n    }")[0]
+        self.assertIn("root.appRequested(", block)
+        self.assertNotIn("refreshRequested", block)
+        self.assertIn("onAppRequested: function(providerId) { appLauncher.open(providerId) }", self.read("Main.qml"))
+        self.assertIn("onClicked: root.appRequested()", self.read("ui", "ExpandedCard.qml"))
+
+    def test_app_launcher_uses_a_fixed_table_with_a_web_fallback(self) -> None:
+        launcher = self.read("model", "AppLauncher.qml")
+        self.assertIn('"desktop": "com.anthropic.Claude"', launcher)
+        self.assertIn('["gtk-launch", app.desktop]', launcher)
+        self.assertIn('["omarchy-launch-webapp", root.pendingUrl]', launcher)
+        self.assertNotIn("preferences", launcher)
+        self.assertIn("primary.running || fallback.running", launcher)
+
+    def test_insights_panel_is_optional_and_keeps_the_card_open_while_hovered(self) -> None:
+        window = self.read("ui", "EdgeWindow.qml")
+        self.assertIn("preferences.showInsights !== false", window)
+        self.assertIn("root.hoveringCard || root.hoveringPanel) return", window)
+        self.assertIn("insightsPanel.opacity > 0", window)
+        self.assertIn('"showInsights"', self.read("model", "Preferences.qml"))
+        self.assertIn("Insights panel", self.read("ui", "SettingsPane.qml"))
+
+    def test_insights_runner_is_single_flight_cooldown_bounded_and_validates_output(self) -> None:
+        runner = self.read("model", "InsightsRunner.qml")
+        self.assertIn("root.refreshPending = true", runner)
+        self.assertIn("cooldownMs: 15000", runner)
+        self.assertIn("Usage.isInsights(parsed, root.providerId)", runner)
+        self.assertIn('"--provider", root.providerId', runner)
+        self.assertNotIn("console.log", runner)
+        window = self.read("ui", "EdgeWindow.qml")
+        self.assertIn("interval: 60000", window)
+        self.assertIn("running: root.showInsights && !root.previewMode", window)
 
 
 if __name__ == "__main__":

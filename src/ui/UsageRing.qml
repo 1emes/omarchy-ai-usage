@@ -1,5 +1,6 @@
 import QtQuick
 import QtQuick.Shapes
+import "Usage.js" as Usage
 
 Item {
   id: root
@@ -8,12 +9,18 @@ Item {
   property var usedPercent: null
   property bool stale: false
   property bool animationsEnabled: true
+  // False while hidden: the ring rests empty and sweeps in when revealed.
+  property bool active: true
+  property bool hovered: false
+  property bool pressed: false
   property real uiScale: 1
+  property string accentColor: "auto"
+  property string providerColor: "auto"
   property string accessibleName: "Usage"
 
   readonly property bool hasReading: typeof usedPercent === "number" && isFinite(usedPercent)
   readonly property real safeUsed: hasReading ? Math.max(0, Math.min(100, usedPercent)) : 0
-  readonly property real targetFraction: safeUsed / 100
+  readonly property real targetFraction: active ? safeUsed / 100 : 0
   property real animatedFraction: 0
 
   readonly property real designScale: (44 / 117) * uiScale
@@ -21,9 +28,7 @@ Item {
   readonly property real progressStroke: 8 * designScale
   readonly property real ringRadius: Math.max(1, (Math.min(width, height) - trackStroke) / 2)
   readonly property color trackColor: "#303030"
-  readonly property color progressColor: safeUsed < 50
-    ? "#00ff88"
-    : (safeUsed < 70 ? "#f2ff00" : "#ff3f00")
+  property color progressColor: Usage.usageColor(safeUsed, accentColor, providerColor)
 
   Accessible.role: Accessible.ProgressBar
   Accessible.name: root.accessibleName
@@ -34,11 +39,14 @@ Item {
   onTargetFractionChanged: animatedFraction = targetFraction
   Component.onCompleted: animatedFraction = targetFraction
 
+  // Spring with light overshoot (Sileo-style); the sweep is clamped to 0..1.
   Behavior on animatedFraction {
-    NumberAnimation {
-      duration: root.animationsEnabled ? 900 : 0
-      easing.type: Easing.OutCubic
-    }
+    enabled: root.animationsEnabled
+    SpringAnimation { spring: 2.4; damping: 0.28; epsilon: 0.0005 }
+  }
+
+  Behavior on progressColor {
+    ColorAnimation { duration: root.animationsEnabled ? 400 : 0 }
   }
 
   Shape {
@@ -87,5 +95,10 @@ Item {
     height: width
     providerId: root.providerId
     opacity: root.stale ? 0.45 : (root.safeUsed >= 100 ? 0.35 : 1)
+    scale: root.pressed ? 0.88 : (root.hovered ? 1.14 : 1)
+    Behavior on scale {
+      enabled: root.animationsEnabled
+      SpringAnimation { spring: 4; damping: 0.35; epsilon: 0.001 }
+    }
   }
 }

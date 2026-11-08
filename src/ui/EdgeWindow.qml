@@ -19,6 +19,12 @@ PanelWindow {
   property bool hoveringCard: false
   property int hoveredIndex: -1
   property bool settingsOpen: false
+  property var insights: ({})
+  property var insightFailures: ({})
+  property var openableApps: ({})
+  property bool hoveringPanel: false
+  property bool insightsArmed: false
+  property var panelProvider: null
   readonly property bool forcedOpen: Quickshell.env("OMARCHY_AI_USAGE_EXPANDED") === "1"
   readonly property bool horizontalEdge: edge === "top" || edge === "bottom"
   readonly property real contentGap: 28 * (44 / 117) * sizeScale
@@ -33,14 +39,19 @@ PanelWindow {
     && Quickshell.env("OMARCHY_REDUCED_MOTION") !== "1"
   readonly property bool hoverExpansion: autoHide && expandBehavior === "hover"
   readonly property bool unfolded: !autoHide || forcedOpen || heldOpen || settingsOpen
-    || (hoverExpansion && (hoveringSurface || hoveringProvider || hoveringCard || hoveredIndex >= 0))
+    || (hoverExpansion && (hoveringSurface || hoveringProvider || hoveringCard || hoveringPanel || hoveredIndex >= 0))
   readonly property bool showCard: settingsOpen
     || (hoveredIndex >= 0 && hoveredIndex < providers.length && unfolded)
   readonly property var activeProvider: showCard && hoveredIndex >= 0 && hoveredIndex < providers.length
     ? providers[hoveredIndex]
     : null
+  readonly property bool insightsEnabled: preferences.showInsights !== false
+  readonly property bool showInsights: insightsEnabled && showCard && !settingsOpen
+    && insightsArmed && activeProvider !== null
 
   signal refreshRequested(string providerId)
+  signal insightsRequested(string providerId)
+  signal appRequested(string providerId)
   signal preferenceChanged(string key, var value)
 
   function headlineWindow(value) {
@@ -81,6 +92,10 @@ PanelWindow {
     return result
   }
 
+  function previewReset(minutes) {
+    return new Date(Date.now() + minutes * 60000).toISOString()
+  }
+
   function previewProviders() {
     var claude = {
       "schemaVersion": 1,
@@ -88,8 +103,8 @@ PanelWindow {
       "displayName": "Claude",
       "status": "ACTIVE",
       "windows": [
-        { "id": "session", "name": "Current session", "usedPercent": 73, "remainingPercent": 27, "resetCopy": "Resets in 51 min" },
-        { "id": "models", "name": "All models", "usedPercent": 7, "remainingPercent": 93, "resetCopy": "Resets Thu 12:00 AM" }
+        { "id": "session", "name": "Current session", "usedPercent": 73, "remainingPercent": 27, "resetCopy": "Resets in 51 min", "resetAt": previewReset(51), "durationMinutes": 300 },
+        { "id": "models", "name": "All models", "usedPercent": 7, "remainingPercent": 93, "resetCopy": "Resets Thu 12:00 AM", "resetAt": previewReset(4300), "durationMinutes": 10080 }
       ],
       "message": null
     }
@@ -99,8 +114,8 @@ PanelWindow {
       "displayName": "Codex",
       "status": "ACTIVE",
       "windows": [
-        { "id": "five-hour", "name": "5-hour limit", "usedPercent": 21, "remainingPercent": 79, "resetCopy": "Resets in 3h 12 min" },
-        { "id": "weekly", "name": "Weekly", "usedPercent": 34, "remainingPercent": 66, "resetCopy": "Resets Mon 9:00 AM" }
+        { "id": "five-hour", "name": "5-hour limit", "usedPercent": 21, "remainingPercent": 79, "resetCopy": "Resets in 3h 12 min", "resetAt": previewReset(192), "durationMinutes": 300 },
+        { "id": "weekly", "name": "Weekly", "usedPercent": 34, "remainingPercent": 66, "resetCopy": "Resets Mon 9:00 AM", "resetAt": previewReset(6000), "durationMinutes": 10080 }
       ],
       "message": null
     }
@@ -110,7 +125,7 @@ PanelWindow {
       "displayName": "Perplexity",
       "status": "ACTIVE",
       "windows": [
-        { "id": "queries", "name": "Pro searches", "usedPercent": 52, "remainingPercent": 48, "resetCopy": "Resets tomorrow" }
+        { "id": "queries", "name": "Pro searches", "usedPercent": 52, "remainingPercent": 48, "resetCopy": "Resets tomorrow", "resetAt": previewReset(1200), "durationMinutes": 1440 }
       ],
       "message": null
     }
@@ -127,14 +142,13 @@ PanelWindow {
     hoverGrace.restart()
   }
 
-  // MouseAreas destroyed or disabled while hovered (the provider Repeater is
-  // rebuilt whenever a refresh lands) never report containsMouse=false, which
-  // left the card stuck open. The surface-wide HoverHandler is the source of
-  // truth once the pointer leaves the layer surface.
+  // Refreshes rebuild provider delegates, whose MouseAreas may never report
+  // their exit. Clear every hover flag when the pointer leaves the surface.
   function pointerLeftSurface() {
     root.hoveringSurface = false
     root.hoveringProvider = false
     root.hoveringCard = false
+    root.hoveringPanel = false
     root.scheduleClose()
   }
 
@@ -154,6 +168,29 @@ PanelWindow {
     if (root.edge === "top") return notch.y + notch.height + root.contentGap
     if (root.edge === "bottom") return notch.y - root.contentGap - expandedCard.height
     return Math.max(0, Math.min(root.screenHeight - expandedCard.height, ringY - expandedCard.height / 2))
+  }
+
+  function panelTargetX() {
+    var gap = root.contentGap
+    if (root.edge === "right") return Math.max(0, expandedCard.x - gap - insightsPanel.width)
+    if (root.edge === "left") {
+      return Math.min(Math.max(0, root.screenWidth - insightsPanel.width),
+                      expandedCard.x + expandedCard.width + gap)
+    }
+    return Math.max(0, Math.min(root.screenWidth - insightsPanel.width, expandedCard.x))
+  }
+
+  function panelTargetY() {
+    var gap = root.contentGap
+    if (root.edge === "top") return expandedCard.y + expandedCard.height + gap
+    if (root.edge === "bottom") return Math.max(0, expandedCard.y - gap - insightsPanel.height)
+    var centered = expandedCard.y + (expandedCard.height - insightsPanel.height) / 2
+    return Math.max(0, Math.min(root.screenHeight - insightsPanel.height, centered))
+  }
+
+  function requestInsights() {
+    if (root.previewMode || !root.activeProvider) return
+    root.insightsRequested(String(root.activeProvider.id || ""))
   }
 
   function bridgeRect() {
@@ -209,6 +246,13 @@ PanelWindow {
       radius: Math.round(expandedCard.cardCorner)
     }
     Region {
+      x: insightsPanel.x
+      y: insightsPanel.y
+      width: root.showInsights || insightsPanel.opacity > 0 ? insightsPanel.width : 0
+      height: root.showInsights || insightsPanel.opacity > 0 ? insightsPanel.height : 0
+      radius: Math.round(insightsPanel.corner)
+    }
+    Region {
       x: root.bridgeRect().x
       y: root.bridgeRect().y
       width: root.bridgeRect().width
@@ -225,13 +269,38 @@ PanelWindow {
     interval: 250
     repeat: false
     onTriggered: {
-      if (root.hoveringSurface || root.hoveringProvider || root.hoveringCard) return
+      if (root.hoveringSurface || root.hoveringProvider || root.hoveringCard || root.hoveringPanel) return
       if (root.settingsOpen) {
         root.settingsOpen = false
         root.heldOpen = false
       }
       root.hoveredIndex = -1
     }
+  }
+
+  // The panel waits a beat after the card so the two read as one cascade.
+  Timer {
+    id: insightsArm
+    interval: 320
+    repeat: false
+    running: root.showCard && root.insightsEnabled && !root.settingsOpen && !root.insightsArmed
+    onTriggered: root.insightsArmed = true
+  }
+
+  Timer {
+    id: insightsRefresh
+    interval: 60000
+    repeat: true
+    running: root.showInsights && !root.previewMode
+    onTriggered: root.requestInsights()
+  }
+
+  onShowCardChanged: if (!showCard) insightsArmed = false
+  onSettingsOpenChanged: if (settingsOpen) insightsArmed = false
+  onShowInsightsChanged: if (showInsights) requestInsights()
+  onActiveProviderChanged: {
+    if (activeProvider) panelProvider = activeProvider
+    if (showInsights) requestInsights()
   }
 
   Timer {
@@ -272,7 +341,8 @@ PanelWindow {
       uiScale: root.sizeScale
       animationsEnabled: root.motionEnabled
       showProviderLabel: root.preferences.showProviderLabel === true
-      showPercentage: root.preferences.showPercentage !== false
+      accentColor: String(root.preferences.accentColor || "auto")
+      providerColors: root.preferences.providerColors || ({})
 
       onSurfaceHovered: function(hovered) {
         root.hoveringSurface = hovered
@@ -293,8 +363,8 @@ PanelWindow {
         }
       }
       onProviderActivated: function(index) {
-        if (!root.previewMode && index >= 0 && index < root.providers.length) {
-          root.refreshRequested(String(root.providers[index].id || ""))
+        if (index >= 0 && index < root.providers.length) {
+          root.appRequested(String(root.providers[index].id || ""))
         }
       }
       onBodyActivated: {
@@ -312,7 +382,7 @@ PanelWindow {
       height: implicitHeight
       visible: root.showCard || opacity > 0
       opacity: root.showCard ? 1 : 0
-      scale: root.showCard ? 1 : 0.985
+      scale: root.showCard ? 1 : 0.92
       edge: root.edge
       tailCenter: root.horizontalEdge
         ? notch.x + notch.providerCenter(root.hoveredIndex) - x
@@ -324,8 +394,12 @@ PanelWindow {
       uiScale: root.sizeScale
       animationsEnabled: root.motionEnabled
       showResetTimer: root.preferences.showResetTimer !== false
+      accentColor: String(root.preferences.accentColor || "auto")
+      providerColors: root.preferences.providerColors || ({})
       settingsOpen: root.settingsOpen
       preferences: root.preferences
+      canOpenApp: root.activeProvider !== null && root.openableApps[String(root.activeProvider.id)] !== undefined
+      onAppRequested: root.appRequested(String(root.activeProvider ? root.activeProvider.id : ""))
       onSettingsRequested: {
         root.settingsOpen = !root.settingsOpen
         if (root.settingsOpen) {
@@ -350,7 +424,44 @@ PanelWindow {
         NumberAnimation { duration: root.motionEnabled ? 180 : 0; easing.type: Easing.OutCubic }
       }
       Behavior on scale {
-        NumberAnimation { duration: root.motionEnabled ? 180 : 0; easing.type: Easing.OutCubic }
+        enabled: root.motionEnabled
+        SpringAnimation { spring: 3.2; damping: 0.3; epsilon: 0.001 }
+      }
+    }
+
+    InsightsPanel {
+      id: insightsPanel
+      x: root.panelTargetX()
+      y: root.panelTargetY()
+      width: implicitWidth
+      height: implicitHeight
+      visible: root.showInsights || opacity > 0
+      opacity: root.showInsights ? 1 : 0
+      scale: root.showInsights ? 1 : 0.9
+      transformOrigin: root.edge === "right" ? Item.Right
+        : (root.edge === "left" ? Item.Left : (root.edge === "top" ? Item.Top : Item.Bottom))
+      shown: root.showInsights
+      providerId: root.panelProvider ? String(root.panelProvider.id || "") : "claude"
+      providerName: root.panelProvider ? String(root.panelProvider.displayName || "") : ""
+      insights: root.panelProvider ? (root.insights[String(root.panelProvider.id)] || null) : null
+      failed: root.panelProvider ? root.insightFailures[String(root.panelProvider.id)] === true : false
+      previewMode: root.previewMode
+      uiScale: root.sizeScale
+      animationsEnabled: root.motionEnabled
+      accentColor: String(root.preferences.accentColor || "auto")
+      providerColors: root.preferences.providerColors || ({})
+      onPanelHovered: function(hovered) {
+        root.hoveringPanel = hovered
+        if (hovered) hoverGrace.stop()
+        else root.scheduleClose()
+      }
+
+      Behavior on opacity {
+        NumberAnimation { duration: root.motionEnabled ? 200 : 0; easing.type: Easing.OutCubic }
+      }
+      Behavior on scale {
+        enabled: root.motionEnabled
+        SpringAnimation { spring: 3.2; damping: 0.3; epsilon: 0.001 }
       }
     }
   }
